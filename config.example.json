@@ -1,0 +1,213 @@
+{
+  "locale": "pt-BR",
+
+  "tiers": {
+    "LOCAL": {
+      "upstream": "ollama",
+      "model": "qwen3:8b",
+      "costPer1MTokens": { "input": 0, "output": 0 }
+    },
+    "LIGHT": {
+      "upstream": "moonshot",
+      "model": "kimi-k2.5",
+      "costPer1MTokens": { "input": 0, "output": 0 }
+    },
+    "MEDIUM": {
+      "upstream": "anthropic",
+      "model": "claude-sonnet-4-6",
+      "costPer1MTokens": { "input": 3.00, "output": 15.00 }
+    },
+    "HEAVY": {
+      "upstream": "anthropic",
+      "model": "claude-sonnet-4-6",
+      "costPer1MTokens": { "input": 3.00, "output": 15.00 }
+    }
+  },
+
+  "upstreams": {
+    "ollama": {
+      "baseUrl": "http://127.0.0.1:11434",
+      "protocol": "ollama",
+      "timeout": 30000
+    },
+    "moonshot": {
+      "baseUrl": "https://api.moonshot.ai/v1",
+      "protocol": "openai-compatible",
+      "timeout": 30000
+    },
+    "anthropic": {
+      "baseUrl": "https://api.anthropic.com",
+      "protocol": "anthropic",
+      "timeout": 60000
+    }
+  },
+
+  "proxy": {
+    "port": 8402,
+    "bind": "127.0.0.1"
+  },
+
+  "session": {
+    "enabled": true,
+    "ttlMinutes": 30,
+    "note": "Tier só sobe dentro da mesma conversa. Reseta após TTL de inatividade."
+  },
+
+  "fallback": {
+    "maxRetries": 2,
+    "note": "Se upstream retorna 429 ou 5xx, tenta o próximo tier acima. LOCAL→LIGHT→MEDIUM→HEAVY."
+  },
+
+  "budget": {
+    "enabled": true,
+    "dailyLimitUsd": 1.00,
+    "monthlyLimitUsd": 30.00,
+    "onExhausted": "force_local"
+  },
+
+  "shadowMode": true,
+
+  "sensitive": {
+    "action": "force_local",
+    "patterns": [
+      "senha|password|passwd",
+      "credencia[il]s?|credential",
+      "token(?!ize|ization|izar|ização)",
+      "api[_\\s-]?key|chave.*api|secret[_\\s-]?key",
+      "secret|segredo",
+      "private[_\\s-]?key|chave.*privada",
+      "bearer\\s+[a-zA-Z0-9._~+\\/=-]+",
+      "sk-[a-zA-Z0-9]{20,}",
+      "ssh-(?:rsa|ed25519|ecdsa)\\s",
+      "\\b(?:ghp|gho|ghu|ghs|ghr)_[a-zA-Z0-9]{36,}\\b",
+      "-----BEGIN.*(?:PRIVATE|RSA|EC).*KEY-----"
+    ]
+  },
+
+  "scoring": {
+    "boundaries": {
+      "localLight": -0.05,
+      "lightMedium": 0.10,
+      "mediumHeavy": 0.35
+    },
+    "overrides": {
+      "reasoningKeywordThreshold": 2,
+      "largeContextTokens": 50000
+    },
+    "costBias": {
+      "enabled": true,
+      "weight": 0.3
+    },
+    "weights": {
+      "tokenCount":        0.08,
+      "codePresence":      0.10,
+      "reasoningMarkers":  0.15,
+      "technicalTerms":    0.10,
+      "creativeMarkers":   0.05,
+      "simpleIndicators": -0.18,
+      "multiStepPatterns": 0.10,
+      "questionComplexity": 0.08,
+      "imperativeVerbs":   0.05,
+      "constraints":       0.05,
+      "outputFormat":      0.03,
+      "domainSpecificity": 0.07,
+      "agenticTasks":      0.05,
+      "relayIndicators":  -0.10
+    },
+    "keywords": {
+      "reasoning": [
+        "analise", "análise", "analisar", "compare", "comparar",
+        "avalie", "avaliar", "avaliação",
+        "trade-off", "prós e contras", "vantagens e desvantagens",
+        "por que", "por quê", "explique por que", "justifique", "justificar",
+        "raciocínio", "raciocine", "argumente", "argumentar",
+        "considere", "considerar", "pondere", "ponderar",
+        "reflita", "examine", "examinar", "investigue", "investigar",
+        "analyze", "evaluate", "why", "reason", "argue", "justify"
+      ],
+      "technical": [
+        "arquitetura", "algoritmo", "banco de dados", "api", "endpoint",
+        "microsserviço", "infraestrutura", "pipeline",
+        "migração", "refatorar", "escalabilidade",
+        "latência", "concorrência", "distribuído",
+        "cache", "fila", "mensageria", "monitoramento", "observabilidade",
+        "kubernetes", "docker", "terraform", "ci/cd",
+        "architecture", "algorithm", "database", "microservice",
+        "migration", "refactor", "scalability", "distributed"
+      ],
+      "code": [
+        "função", "classe", "variável", "módulo",
+        "bug", "debug", "debugar", "erro", "exceção", "stack trace",
+        "compilar", "executar", "rodar", "testar", "teste unitário",
+        "typescript", "python", "javascript", "node", "react",
+        "sql", "query", "regex", "bash", "script",
+        "```", "const ", "let ", "function", "class",
+        "import ", "def ", "async ", "await "
+      ],
+      "simple": [
+        "que horas", "quanto custa", "onde fica",
+        "oi", "olá", "bom dia", "boa tarde", "boa noite", "e aí",
+        "obrigado", "obrigada", "valeu", "beleza", "tá bom", "entendi",
+        "sim", "não", "ok", "claro", "certo",
+        "tchau", "até mais", "falou",
+        "hi", "hello", "thanks", "bye", "yes", "no"
+      ],
+      "relay": [
+        "diga oi", "encaminhe", "repasse",
+        "lembre-me", "me lembra", "lembrete",
+        "status", "heartbeat", "ping",
+        "remind me", "forward", "health"
+      ],
+      "agentic": [
+        "pesquise", "encontre", "busque", "procure",
+        "crie", "criar", "rode", "execute",
+        "instale", "baixe", "deploy", "publique", "agende",
+        "search", "find", "create", "run", "install"
+      ],
+      "creative": [
+        "escreva", "escrever", "redija", "redigir",
+        "história", "texto", "artigo", "post", "blog",
+        "poema", "criativo", "narrativa", "rascunho", "invente",
+        "write", "story", "poem", "creative", "fiction", "draft"
+      ],
+      "imperative": [
+        "reescreva", "redesenhe", "refaça", "reformule",
+        "otimize", "implemente", "construa", "desenvolva",
+        "corrija", "resolva", "gere", "converta", "transforme",
+        "adapte", "simplifique", "resuma", "sintetize",
+        "rewrite", "optimize", "implement", "build", "fix", "solve"
+      ],
+      "constraints": [
+        "deve", "precisa", "obrigatório", "não pode", "não deve",
+        "no máximo", "no mínimo", "exatamente",
+        "limite", "orçamento", "prazo", "deadline",
+        "requisito", "restrição", "critério",
+        "must", "should not", "within", "requirement"
+      ],
+      "outputFormat": [
+        "json", "yaml", "csv", "markdown", "tabela", "planilha",
+        "lista", "diagrama", "gráfico", "relatório",
+        "apresentação", "documento", "template",
+        "table", "chart", "report", "spreadsheet"
+      ],
+      "domain": [
+        "negócio", "negócios", "operação", "operações",
+        "cliente", "clientes", "fornecedor", "parceiro",
+        "receita", "margem", "faturamento", "custo",
+        "indicador", "métrica", "meta", "resultado",
+        "processo", "fluxo", "workflow", "automação",
+        "business", "operations", "revenue", "metric", "workflow"
+      ]
+    }
+  },
+
+  "telegramOverrides": {
+    "enabled": true,
+    "commands": {
+      "/local": "LOCAL",
+      "/cloud": "LIGHT",
+      "/pro":   "MEDIUM",
+      "/max":   "HEAVY"
+    }
+  }
+}

@@ -1,0 +1,11 @@
+config.json
+node_modules/
+*.log
+*.jsonl
+dispatcher-stats.json
+dispatcher-monthly.json
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*~

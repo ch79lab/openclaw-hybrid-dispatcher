@@ -1,0 +1,14 @@
+{
+  "name": "openclaw-hybrid-dispatcher",
+  "version": "4.0.0",
+  "description": "Hybrid Local/Cloud Model Router — dual upstream (Ollama + Cloud), credential enforcement, 14-dim scorer, cost bias",
+  "type": "module",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node test.mjs",
+    "dev": "DISPATCHER_VERBOSE=1 node server.mjs"
+  },
+  "private": true,
+  "engines": { "node": ">=22.0.0" }
+}
