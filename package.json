@@ -1,7 +1,7 @@
 {
   "name": "openclaw-hybrid-dispatcher",
-  "version": "4.0.0",
-  "description": "Hybrid Local/Cloud Model Router — dual upstream (Ollama + Cloud), credential enforcement, 14-dim scorer, cost bias",
+  "version": "1.0.0",
+  "description": "Session-aware hybrid local/cloud model router for OpenClaw — 14-dim scorer, credential enforcement, multi-provider, fallback chain, PT-BR first",
   "type": "module",
   "main": "server.mjs",
   "scripts": {

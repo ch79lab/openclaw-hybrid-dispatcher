@@ -1,11 +1,22 @@
+# Config real (tem paths locais; usar config.example.json como template)
 config.json
+
+# Node
 node_modules/
+
+# Logs e estado (gerados em runtime)
 *.log
 *.jsonl
 dispatcher-stats.json
 dispatcher-monthly.json
+
+# OS
 .DS_Store
+Thumbs.db
+
+# IDE
 .vscode/
 .idea/
 *.swp
+*.swo
 *~
