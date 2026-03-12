@@ -208,8 +208,11 @@ function isSensitive(text) {
  * frequentemente falham em tool use.
  */
 function hasToolUse(body) {
-  if (body.tools && Array.isArray(body.tools) && body.tools.length > 0) return true;
-  if (body.tool_choice && body.tool_choice !== 'none') return true;
+  // body.tools sozinho é declaração de capacidade (OpenClaw sempre manda)
+  // Só conta como tool use real quando há tool_choice explícito
+  // ou quando há tool_result na conversa (tool já foi chamada)
+  if (body.tool_choice && body.tool_choice !== 'none' && body.tool_choice !== 'auto') return true;
+  if (body.messages?.some(m => m.role === 'tool' || m.role === 'tool_result')) return true;
   return false;
 }
 
