@@ -19,7 +19,7 @@ O dispatcher resolve isso:
 ```
 LOCAL   "converte esse JSON pra YAML"                        → Ollama     $0.000
 LOCAL   "qual o comando pra listar portas abertas no mac?"   → Ollama     $0.000
-LIGHT   "gera um .gitignore pra Node com TypeScript"         → Kimi       $0.000
+LIGHT   "gera um .gitignore pra Node com TypeScript"         → Haiku      $0.001
 MEDIUM  "refatora esse endpoint pra async/await com tratamento de erro"
                                                              → Sonnet    ~$0.003
 HEAVY   "redesenha a arquitetura do billing pra suportar 10x mais volume.
@@ -145,7 +145,7 @@ Configurável via `session.ttlMinutes` (default 30min). Endpoint `/sessions` mos
 Se um upstream falha (429 rate limit, 500 server error), o dispatcher tenta automaticamente o próximo tier acima:
 
 ```
-LIGHT (Kimi 429) → MEDIUM (Sonnet) → sucesso
+LIGHT (Haiku 429) → MEDIUM (Sonnet) → sucesso
 ```
 
 Configurável via `fallback.maxRetries` (default 2). Stats rastreiam quantos fallbacks ocorreram.
@@ -159,7 +159,7 @@ Copie `config.example.json` → `config.json` e edite.
 {
   "tiers": {
     "LOCAL":  { "upstream": "ollama", "model": "qwen3:8b" },
-    "LIGHT":  { "upstream": "cloud",  "model": "claude-haiku-4.5" },
+    "LIGHT":  { "upstream": "cloud",  "model": "claude-haiku-4-5-20251001" },
     "MEDIUM": { "upstream": "cloud",  "model": "claude-sonnet-4-6" },
     "HEAVY":  { "upstream": "cloud",  "model": "claude-sonnet-4-6" }
   }
@@ -274,7 +274,7 @@ The dispatcher fixes this:
 ```
 LOCAL   "convert this JSON to YAML"                          → Ollama     $0.000
 LOCAL   "what's the command to list open ports on mac?"      → Ollama     $0.000
-LIGHT   "generate a .gitignore for Node with TypeScript"     → Kimi       $0.000
+LIGHT   "generate a .gitignore for Node with TypeScript"     → Haiku      $0.001
 MEDIUM  "refactor this endpoint to async/await with error handling"
                                                              → Sonnet    ~$0.003
 HEAVY   "redesign the billing architecture to handle 10x more volume.
@@ -400,7 +400,7 @@ Configurable via `session.ttlMinutes` (default 30min). Endpoint `/sessions` show
 If an upstream fails (429 rate limit, 500 server error), the dispatcher automatically tries the next tier up:
 
 ```
-LIGHT (Kimi 429) → MEDIUM (Sonnet) → success
+LIGHT (Haiku 429) → MEDIUM (Sonnet) → success
 ```
 
 Configurable via `fallback.maxRetries` (default 2). Stats track fallback count.
@@ -414,7 +414,7 @@ Copy `config.example.json` → `config.json` and edit.
 {
   "tiers": {
     "LOCAL":  { "upstream": "ollama", "model": "qwen3:8b" },
-    "LIGHT":  { "upstream": "cloud",  "model": "claude-haiku-4.5" },
+    "LIGHT":  { "upstream": "cloud",  "model": "claude-haiku-4-5-20251001" },
     "MEDIUM": { "upstream": "cloud",  "model": "claude-sonnet-4-6" },
     "HEAVY":  { "upstream": "cloud",  "model": "claude-sonnet-4-6" }
   }
