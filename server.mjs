@@ -441,15 +441,34 @@ function defaultUpstream() {
   return names.find(n => n !== 'ollama') || names[0] || 'anthropic';
 }
 
-function toOllamaBody(body, model) {
-  const messages = (body.messages || []).map(m => ({
-    role: m.role === 'assistant' ? 'assistant' : (m.role === 'system' ? 'system' : 'user'),
-    content: typeof m.content === 'string' ? m.content :
-      Array.isArray(m.content) ? m.content.filter(b => b.type === 'text').map(b => b.text).join('\n') :
-      JSON.stringify(m.content),
-  }));
-  if (body.system) messages.unshift({ role: 'system', content: body.system });
-  return { model, messages, stream: false };
+function toOllamaBody(body, model, tierCfg) {
+  const messages = (body.messages || []).map(m => {
+    const role = m.role === 'assistant' ? 'assistant' : (m.role === 'system' ? 'system' : 'user');
+    let content;
+    if (typeof m.content === 'string') {
+      content = m.content;
+    } else if (Array.isArray(m.content)) {
+      const texts = m.content.filter(b => b.type === 'text').map(b => b.text || '');
+      content = texts.length > 0 ? texts.join('\n') : JSON.stringify(m.content);
+    } else {
+      content = m.content ? JSON.stringify(m.content) : '';
+    }
+    return { role, content: String(content) };
+  });
+  if (body.system) {
+    const sysContent = typeof body.system === 'string' ? body.system :
+      Array.isArray(body.system) ? body.system.filter(b => b.type === 'text').map(b => b.text || '').join('\n') || JSON.stringify(body.system) :
+      String(body.system);
+    messages.unshift({ role: 'system', content: sysContent });
+  }
+  // Safety: ensure ALL content fields are strings for Ollama
+  for (const msg of messages) {
+    if (typeof msg.content !== 'string') msg.content = JSON.stringify(msg.content);
+  }
+  const opts = tierCfg?.ollamaOptions || {};
+  const think = opts.think;
+  const filteredOpts = Object.fromEntries(Object.entries(opts).filter(([k]) => k !== 'think'));
+  return { model, messages, stream: false, options: filteredOpts, ...(think !== undefined ? { think } : {}) };
 }
 
 function fromOllamaResponse(data, model) {
@@ -466,7 +485,7 @@ function proxyToOllama(clientRes, body, tierCfg) {
   return new Promise((resolve, reject) => {
     const up = CONFIG.upstreams?.ollama || {};
     const url = new URL(up.baseUrl || 'http://127.0.0.1:11434');
-    const payload = JSON.stringify(toOllamaBody(body, tierCfg.model));
+    const payload = JSON.stringify(toOllamaBody(body, tierCfg.model, tierCfg));
 
     const req = httpRequest({
       hostname: url.hostname, port: url.port || 11434,
