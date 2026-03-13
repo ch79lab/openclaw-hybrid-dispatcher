@@ -1,30 +1,15 @@
-#!/usr/bin/env node
 /**
  * openclaw-hybrid-dispatcher — Session-Aware Hybrid Model Router
  *
- * Proxy HTTP para stacks híbridas local/cloud (Ollama + cloud providers).
+ * v5.2 — Actual cost tracking (SSE + JSON)
  *
- * Diferenciais:
- * - Session-aware: tier só sobe, nunca desce dentro da mesma conversa
- * - Tool use / multimodal detection: bump automático quando request usa tools ou imagens
- * - Fallback chain: se upstream falha (429, 5xx), tenta o próximo tier
- * - Credential enforcement: segredos nunca saem da máquina
- * - Multi-provider: cada tier pode apontar para upstream diferente
- * - 14-dimension weighted scorer (<1ms)
- * - Cost bias, budget control, shadow mode, hot-reload
- * - Zero dependências. Node 22+.
+ * Changelog:
+ * - v5.0: initial — scoring, session, fallback, budget
+ * - v5.1: actual cost tracking from response usage
+ * - v5.2: fix SSE streaming (tee pattern), fix gzip (strip accept-encoding),
+ *         actual cost in budget controller
  *
- * Arquitetura:
- *
- *   OpenClaw → :8402 → session tracker → scorer (<1ms)
- *                                            ↓
- *                  ┌─────────────────────────┼──────────────────────────┐
- *                  ↓                         ↓                         ↓
- *               LOCAL                   LIGHT/MEDIUM                 HEAVY
- *             Ollama local              Cloud APIs                Cloud APIs
- *                  ↓                         ↓                         ↓
- *              (response)              fallback chain             (response)
- *                                    429/5xx → next tier
+ * Zero dependências. Node 22+.
  */
 
 import { createServer, request as httpRequest } from 'http';
@@ -91,7 +76,7 @@ function log(level, msg) {
 }
 
 // ═══════════════════════════════════════════════════════════
-// TIER ORDERING (para session tracking e fallback)
+// TIER ORDERING
 // ═══════════════════════════════════════════════════════════
 
 const TIER_ORDER = ['LOCAL', 'LIGHT', 'MEDIUM', 'HEAVY'];
@@ -101,23 +86,13 @@ function tierAbove(tier) { const i = tierRank(tier); return TIER_ORDER[Math.min(
 // ═══════════════════════════════════════════════════════════
 // SESSION TRACKER — tier só sobe, nunca desce
 // ═══════════════════════════════════════════════════════════
-// Quando uma conversa escala de complexidade e sobe para
-// MEDIUM ou HEAVY, ela FICA naquele tier até expirar.
-// Resolve o problema "Frankenstein context" — metade local,
-// metade cloud, sem coerência.
 
-const sessions = new Map(); // sessionId → { tier, lastSeen, requestCount }
+const sessions = new Map();
 
 function getSessionId(body, headers) {
-  // OpenClaw envia session info de várias formas
-  // 1. Header x-session-id (se configurado)
-  // 2. Conversation metadata no body
-  // 3. Hash das primeiras mensagens como fallback
   if (headers['x-session-id']) return headers['x-session-id'];
   if (headers['x-conversation-id']) return headers['x-conversation-id'];
 
-  // Fallback: usar hash do system prompt + primeiro user message como session proxy
-  // Conversas diferentes têm system prompts diferentes no OpenClaw
   const parts = [];
   if (body.system) parts.push(body.system.slice(0, 100));
   const firstUser = body.messages?.find(m => m.role === 'user');
@@ -127,7 +102,6 @@ function getSessionId(body, headers) {
   }
   if (parts.length === 0) return null;
 
-  // Simple hash
   let hash = 0;
   const str = parts.join('|');
   for (let i = 0; i < str.length; i++) {
@@ -144,7 +118,6 @@ function getSessionTier(sessionId) {
   const s = sessions.get(sessionId);
   if (!s) return null;
 
-  // Expirou?
   const ttl = (cfg.ttlMinutes || 30) * 60 * 1000;
   if (Date.now() - s.lastSeen > ttl) {
     sessions.delete(sessionId);
@@ -163,7 +136,6 @@ function updateSession(sessionId, tier) {
   const currentRank = existing ? tierRank(existing.tier) : -1;
   const newRank = tierRank(tier);
 
-  // Tier só sobe, nunca desce
   if (newRank > currentRank) {
     sessions.set(sessionId, {
       tier,
@@ -180,7 +152,6 @@ function updateSession(sessionId, tier) {
     sessions.set(sessionId, { tier, lastSeen: Date.now(), requestCount: 1 });
   }
 
-  // Cleanup: remover sessões expiradas (a cada 100 requests)
   if (sessions.size > 100) {
     const ttl = (cfg.ttlMinutes || 30) * 60 * 1000;
     const now = Date.now();
@@ -202,24 +173,12 @@ function isSensitive(text) {
 // TOOL USE & MULTIMODAL DETECTION
 // ═══════════════════════════════════════════════════════════
 
-/**
- * Detecta se o request usa tool calling.
- * Se sim, bump mínimo para MEDIUM — modelos locais pequenos
- * frequentemente falham em tool use.
- */
 function hasToolUse(body) {
-  // body.tools sozinho é declaração de capacidade (OpenClaw sempre manda)
-  // Só conta como tool use real quando há tool_choice explícito
-  // ou quando há tool_result na conversa (tool já foi chamada)
   if (body.tool_choice && body.tool_choice !== 'none' && body.tool_choice !== 'auto') return true;
   if (body.messages?.some(m => m.role === 'tool' || m.role === 'tool_result')) return true;
   return false;
 }
 
-/**
- * Detecta se alguma mensagem contém conteúdo multimodal (imagens, docs).
- * Se sim, bump mínimo para LIGHT — Ollama local pode não suportar vision.
- */
 function hasMultimodal(body) {
   if (!body.messages || !Array.isArray(body.messages)) return false;
   return body.messages.some(m => {
@@ -263,7 +222,11 @@ function scoreRequest(userText, body) {
   const ov = CONFIG.scoring?.overrides || {};
   const cb = CONFIG.scoring?.costBias || {};
 
-  const allText = (body.messages || []).map(m => typeof m.content === 'string' ? m.content : '').join(' ');
+  const allText = (body.messages || []).map(m =>
+    typeof m.content === 'string' ? m.content :
+    Array.isArray(m.content) ? m.content.filter(b => b.type === 'text').map(b => b.text).join(' ') :
+    ''
+  ).join(' ');
   const totalTokens = estimateTokens(allText);
   const wordCount = userText.split(/\s+/).filter(Boolean).length;
   const reasoningHits = countHits(userText, kw.reasoning);
@@ -329,7 +292,7 @@ function detectOverride(text) {
 }
 
 // ═══════════════════════════════════════════════════════════
-// BUDGET
+// BUDGET & COST — ACTUAL TRACKING (v5.1+)
 // ═══════════════════════════════════════════════════════════
 
 function loadJSON(p) { try { return JSON.parse(readFileSync(p, 'utf8')); } catch { return null; } }
@@ -338,19 +301,31 @@ function saveJSON(p, d) { try { ensureDir(p); writeFileSync(p, JSON.stringify(d,
 function loadDailyStats() {
   const today = new Date().toISOString().split('T')[0];
   const s = loadJSON(PATHS.dailyStats);
-  return (s?.date === today) ? s : { date: today, requests: 0, costUsd: 0, byTier: {}, sensitive: 0, toolUse: 0, multimodal: 0, sessionEscalations: 0, fallbacks: 0 };
+  return (s?.date === today) ? s : {
+    date: today, requests: 0,
+    estimatedCostUsd: 0, actualCostUsd: 0,
+    inputTokens: 0, outputTokens: 0,
+    byTier: {}, sensitive: 0, toolUse: 0, multimodal: 0,
+    sessionEscalations: 0, fallbacks: 0,
+  };
 }
 function loadMonthlyStats() {
   const m = new Date().toISOString().slice(0, 7);
   const s = loadJSON(PATHS.monthlyStats);
-  return (s?.month === m) ? s : { month: m, requests: 0, costUsd: 0 };
+  return (s?.month === m) ? s : {
+    month: m, requests: 0,
+    estimatedCostUsd: 0, actualCostUsd: 0,
+    inputTokens: 0, outputTokens: 0,
+  };
 }
 
 function isBudgetExhausted() {
   if (!CONFIG.budget?.enabled) return false;
   const d = loadDailyStats(), m = loadMonthlyStats();
-  if (d.costUsd >= (CONFIG.budget.dailyLimitUsd || Infinity)) return 'daily';
-  if (m.costUsd >= (CONFIG.budget.monthlyLimitUsd || Infinity)) return 'monthly';
+  const dailyCost = d.actualCostUsd || d.estimatedCostUsd;
+  const monthlyCost = m.actualCostUsd || m.estimatedCostUsd;
+  if (dailyCost >= (CONFIG.budget.dailyLimitUsd || Infinity)) return 'daily';
+  if (monthlyCost >= (CONFIG.budget.monthlyLimitUsd || Infinity)) return 'monthly';
   return false;
 }
 
@@ -360,18 +335,95 @@ function estimateCost(tier, tokens) {
   return ((tokens * 0.7 * (r.input || 0)) + (tokens * 0.3 * (r.output || 0))) / 1_000_000;
 }
 
-function recordRequest(tier, tokens, flags, shadow) {
-  const cost = estimateCost(tier, tokens);
+function computeActualCost(tier, usage) {
+  if (!usage || (!usage.input_tokens && !usage.output_tokens)) return null;
+  const r = CONFIG.tiers?.[tier]?.costPer1MTokens;
+  if (!r) return null;
+  return ((usage.input_tokens || 0) * (r.input || 0) + (usage.output_tokens || 0) * (r.output || 0)) / 1_000_000;
+}
+
+/**
+ * Extract usage from API response.
+ * Handles JSON (non-streaming) and SSE (streaming) formats.
+ *
+ * Anthropic SSE:
+ *   event: message_start → message.usage.input_tokens
+ *   event: message_delta → usage.output_tokens
+ */
+function extractUsage(responseText) {
+  // 1. JSON (non-streaming)
+  try {
+    const data = JSON.parse(responseText);
+    if (data?.usage?.input_tokens !== undefined) {
+      return {
+        input_tokens: data.usage.input_tokens || 0,
+        output_tokens: data.usage.output_tokens || 0,
+      };
+    }
+  } catch {}
+
+  // 2. SSE (streaming)
+  try {
+    let inputTokens = 0;
+    let outputTokens = 0;
+
+    const lines = responseText.split('\n');
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue;
+      const jsonStr = line.slice(6).trim();
+      if (!jsonStr || jsonStr === '[DONE]') continue;
+      try {
+        const event = JSON.parse(jsonStr);
+        if (event.type === 'message_start' && event.message?.usage) {
+          inputTokens = event.message.usage.input_tokens || 0;
+        }
+        if (event.type === 'message_delta' && event.usage) {
+          outputTokens = event.usage.output_tokens || 0;
+        }
+      } catch {}
+    }
+
+    if (inputTokens > 0 || outputTokens > 0) {
+      return { input_tokens: inputTokens, output_tokens: outputTokens };
+    }
+  } catch {}
+
+  return null;
+}
+
+function recordRequest(tier, estimatedTokens, flags, shadow, usage) {
+  const estimated = estimateCost(tier, estimatedTokens);
+  const actual = computeActualCost(tier, usage);
+  const cost = actual ?? estimated;
+
   const d = loadDailyStats(), m = loadMonthlyStats();
-  d.requests++; d.costUsd += cost; d.byTier[tier] = (d.byTier[tier] || 0) + 1;
+
+  d.requests++;
+  d.estimatedCostUsd += estimated;
+  if (actual !== null) d.actualCostUsd += actual;
+  if (usage) {
+    d.inputTokens += usage.input_tokens || 0;
+    d.outputTokens += usage.output_tokens || 0;
+  }
+  d.byTier[tier] = (d.byTier[tier] || 0) + 1;
   if (flags.sensitive) d.sensitive = (d.sensitive || 0) + 1;
   if (flags.toolUse) d.toolUse = (d.toolUse || 0) + 1;
   if (flags.multimodal) d.multimodal = (d.multimodal || 0) + 1;
   if (flags.sessionEscalated) d.sessionEscalations = (d.sessionEscalations || 0) + 1;
   if (flags.fallback) d.fallbacks = (d.fallbacks || 0) + 1;
-  m.requests++; m.costUsd += cost;
-  saveJSON(PATHS.dailyStats, d); saveJSON(PATHS.monthlyStats, m);
-  return cost;
+
+  m.requests++;
+  m.estimatedCostUsd += estimated;
+  if (actual !== null) m.actualCostUsd += actual;
+  if (usage) {
+    m.inputTokens += usage.input_tokens || 0;
+    m.outputTokens += usage.output_tokens || 0;
+  }
+
+  saveJSON(PATHS.dailyStats, d);
+  saveJSON(PATHS.monthlyStats, m);
+
+  return { estimated, actual, cost };
 }
 
 function writeFeedback(entry) {
@@ -430,7 +482,11 @@ function proxyToOllama(clientRes, body, tierCfg) {
           const resp = fromOllamaResponse(raw, tierCfg.model);
           clientRes.writeHead(200, { 'Content-Type': 'application/json' });
           clientRes.end(JSON.stringify(resp));
-          resolve({ ok: true });
+          const usage = {
+            input_tokens: raw.prompt_eval_count || 0,
+            output_tokens: raw.eval_count || 0,
+          };
+          resolve({ ok: true, usage });
         } catch (e) { reject(e); }
       });
     });
@@ -441,8 +497,10 @@ function proxyToOllama(clientRes, body, tierCfg) {
 }
 
 /**
- * Proxy para upstream cloud. Retorna Promise com status code.
- * Usado pelo fallback chain para detectar 429/5xx e tentar próximo tier.
+ * Proxy para upstream cloud.
+ * v5.2: strips accept-encoding (prevents gzip), handles SSE + JSON.
+ * SSE: tee pattern — pipe chunks to client in real-time, collect for usage.
+ * JSON: buffer, extract usage, send.
  */
 function proxyToUpstream(clientReq, clientRes, body, upstreamName) {
   return new Promise((resolve, reject) => {
@@ -454,22 +512,53 @@ function proxyToUpstream(clientReq, clientRes, body, upstreamName) {
     const payload = JSON.stringify(body);
     headers['content-length'] = Buffer.byteLength(payload);
 
+    // Strip accept-encoding to prevent gzip — we need to read the response body
+    delete headers['accept-encoding'];
+
     const req = requester({
       hostname: url.hostname, port: url.port || (isHttps ? 443 : 80),
       path: clientReq.url, method: clientReq.method, headers,
       timeout: up.timeout || 60000,
     }, (res) => {
-      // Fallback-eligible: colete body para poder redirecionar
+
+      // Fallback-eligible: 429/5xx
       if (res.statusCode === 429 || res.statusCode >= 500) {
         const chunks = [];
         res.on('data', c => chunks.push(c));
         res.on('end', () => {
-          resolve({ ok: false, status: res.statusCode, body: Buffer.concat(chunks).toString() });
+          resolve({ ok: false, status: res.statusCode, body: Buffer.concat(chunks).toString(), usage: null });
+        });
+        return;
+      }
+
+      const contentType = res.headers['content-type'] || '';
+      const isStreaming = contentType.includes('text/event-stream');
+
+      if (isStreaming) {
+        // SSE: tee — pipe to client + collect for usage extraction
+        clientRes.writeHead(res.statusCode, res.headers);
+        const chunks = [];
+        res.on('data', (chunk) => {
+          chunks.push(chunk);
+          clientRes.write(chunk);
+        });
+        res.on('end', () => {
+          clientRes.end();
+          const fullBody = Buffer.concat(chunks).toString();
+          const usage = extractUsage(fullBody);
+          resolve({ ok: true, status: res.statusCode, usage });
         });
       } else {
-        clientRes.writeHead(res.statusCode, res.headers);
-        res.pipe(clientRes, { end: true });
-        res.on('end', () => resolve({ ok: true, status: res.statusCode }));
+        // JSON: buffer, extract, send
+        const chunks = [];
+        res.on('data', c => chunks.push(c));
+        res.on('end', () => {
+          const responseBody = Buffer.concat(chunks);
+          const usage = extractUsage(responseBody.toString());
+          clientRes.writeHead(res.statusCode, res.headers);
+          clientRes.end(responseBody);
+          resolve({ ok: true, status: res.statusCode, usage });
+        });
       }
     });
     req.on('error', reject);
@@ -481,8 +570,6 @@ function proxyToUpstream(clientReq, clientRes, body, upstreamName) {
 // ═══════════════════════════════════════════════════════════
 // FALLBACK CHAIN
 // ═══════════════════════════════════════════════════════════
-// Se upstream retorna 429 ou 5xx, tenta o próximo tier acima.
-// Ex: LIGHT falha → tenta MEDIUM → tenta HEAVY → desiste.
 
 async function proxyWithFallback(clientReq, clientRes, body, startTier) {
   const maxRetries = CONFIG.fallback?.maxRetries ?? 2;
@@ -495,21 +582,20 @@ async function proxyWithFallback(clientReq, clientRes, body, startTier) {
 
     try {
       if (tc.upstream === 'ollama') {
-        await proxyToOllama(clientRes, body, tc);
-        return { finalTier: currentTier, fallback: attempts > 0 };
+        const result = await proxyToOllama(clientRes, body, tc);
+        return { finalTier: currentTier, fallback: attempts > 0, usage: result.usage };
       }
 
       body.model = tc.model || body.model;
       const result = await proxyToUpstream(clientReq, clientRes, body, tc.upstream || defaultUpstream());
 
       if (result.ok) {
-        return { finalTier: currentTier, fallback: attempts > 0 };
+        return { finalTier: currentTier, fallback: attempts > 0, usage: result.usage };
       }
 
-      // Upstream failed — try next tier
       log('WARN', `Upstream ${tc.upstream} returned ${result.status} for tier ${currentTier} — trying fallback`);
       const nextTier = tierAbove(currentTier);
-      if (nextTier === currentTier) break; // Already at top
+      if (nextTier === currentTier) break;
       currentTier = nextTier;
       attempts++;
 
@@ -522,12 +608,11 @@ async function proxyWithFallback(clientReq, clientRes, body, startTier) {
     }
   }
 
-  // All fallbacks exhausted — return error
   if (!clientRes.headersSent) {
     clientRes.writeHead(502, { 'Content-Type': 'application/json' });
     clientRes.end(JSON.stringify({ error: 'all_upstreams_failed', lastTier: currentTier }));
   }
-  return { finalTier: currentTier, fallback: true, failed: true };
+  return { finalTier: currentTier, fallback: true, failed: true, usage: null };
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -542,42 +627,35 @@ function routeRequest(body, headers) {
   const multimodal = hasMultimodal(body);
   const sessionId = getSessionId(body, headers);
 
-  // 1. Sensitive → LOCAL
   if (sensitive && CONFIG.sensitive?.action === 'force_local') {
     return { tier: 'LOCAL', reason: 'sensitive_enforcement', score: null, confidence: 1.0, totalTokens: tokens, sensitive: true, tools, multimodal, sessionId };
   }
 
-  // 2. Manual override
   const override = detectOverride(userText);
   if (override) {
     return { tier: override, reason: 'manual_override', score: null, confidence: 1.0, totalTokens: tokens, sensitive: false, tools, multimodal, sessionId };
   }
 
-  // 3. Budget exhausted
   const budget = isBudgetExhausted();
   if (budget) {
     const tier = (CONFIG.budget?.onExhausted || 'force_local') === 'force_local' ? 'LOCAL' : 'LIGHT';
     return { tier, reason: `budget_${budget}`, score: null, confidence: 1.0, totalTokens: tokens, sensitive: false, tools, multimodal, sessionId };
   }
 
-  // 4. Score
   const result = scoreRequest(userText, body);
   let tier = result.tier;
   let reason = result.overrideReason || `score_${tier.toLowerCase()}`;
 
-  // 5. Tool use bump: mínimo MEDIUM (modelos locais pequenos falham em tool use)
   if (tools && tierRank(tier) < tierRank('MEDIUM')) {
     tier = 'MEDIUM';
     reason = `tool_use_bump(was:${result.tier})`;
   }
 
-  // 6. Multimodal bump: mínimo LIGHT (Ollama pode não suportar vision)
   if (multimodal && tierRank(tier) < tierRank('LIGHT')) {
     tier = 'LIGHT';
     reason = `multimodal_bump(was:${result.tier})`;
   }
 
-  // 7. Session-aware: tier só sobe, nunca desce
   const sessionTier = getSessionTier(sessionId);
   if (sessionTier && tierRank(sessionTier) > tierRank(tier)) {
     reason = `session_hold(${sessionTier},was:${tier})`;
@@ -598,14 +676,28 @@ function collectBody(req, cb) {
 }
 
 function handleRequest(clientReq, clientRes) {
-  // Management endpoints
   if (clientReq.url === '/health') {
     clientRes.writeHead(200, { 'Content-Type': 'application/json' });
     return clientRes.end(JSON.stringify({ status: 'ok', shadow: CONFIG.shadowMode, uptime: process.uptime(), locale: CONFIG.locale, activeSessions: sessions.size }));
   }
   if (clientReq.url === '/stats') {
+    const daily = loadDailyStats();
+    const monthly = loadMonthlyStats();
     clientRes.writeHead(200, { 'Content-Type': 'application/json' });
-    return clientRes.end(JSON.stringify({ daily: loadDailyStats(), monthly: loadMonthlyStats(), shadow: CONFIG.shadowMode, activeSessions: sessions.size }));
+    return clientRes.end(JSON.stringify({
+      daily, monthly,
+      budget: {
+        limit: CONFIG.budget?.monthlyLimitUsd || null,
+        spent: monthly.actualCostUsd || monthly.estimatedCostUsd,
+        remaining: CONFIG.budget?.monthlyLimitUsd
+          ? (CONFIG.budget.monthlyLimitUsd - (monthly.actualCostUsd || monthly.estimatedCostUsd))
+          : null,
+        source: monthly.actualCostUsd > 0 ? 'actual' : 'estimated',
+        dailyTarget: CONFIG.budget?.monthlyLimitUsd ? (CONFIG.budget.monthlyLimitUsd / 30) : null,
+      },
+      shadow: CONFIG.shadowMode,
+      activeSessions: sessions.size,
+    }));
   }
   if (clientReq.url === '/config') {
     const { tiers, budget, shadowMode, locale, session, fallback } = CONFIG;
@@ -629,7 +721,6 @@ function handleRequest(clientReq, clientRes) {
     return clientRes.end(JSON.stringify({ count: sessions.size, sessions: data }));
   }
 
-  // Non-message → passthrough
   if (clientReq.method !== 'POST' || !clientReq.url?.startsWith('/v1/messages')) {
     collectBody(clientReq, (raw) => {
       let b; try { b = JSON.parse(raw); } catch { b = undefined; }
@@ -641,7 +732,6 @@ function handleRequest(clientReq, clientRes) {
     return;
   }
 
-  // Message routing
   collectBody(clientReq, (raw) => {
     let body;
     try { body = JSON.parse(raw); } catch {
@@ -660,27 +750,37 @@ function handleRequest(clientReq, clientRes) {
 
       if (CONFIG.shadowMode) {
         log('INFO', `[SHADOW→${r.tier}] score=${r.score?.toFixed(3)} reason=${r.reason} tools=${r.tools} mm=${r.multimodal} session=${r.sessionId?.slice(0,8)} ${ms}ms`);
-        recordRequest(r.tier, r.totalTokens || 0, flags, true);
+        recordRequest(r.tier, r.totalTokens || 0, flags, true, null);
         writeFeedback({ ts: new Date().toISOString(), tier: r.tier, score: r.score, reason: r.reason, ...flags, shadow: true, ms });
         proxyToUpstream(clientReq, clientRes, body, defaultUpstream()).catch(() => {});
         return;
       }
 
-      // Live routing with session tracking and fallback
       log('INFO', `[${r.tier}] score=${r.score?.toFixed(3)} ${orig}→${tc?.model} reason=${r.reason} tools=${r.tools} mm=${r.multimodal} session=${r.sessionId?.slice(0,8)} ${ms}ms`);
 
       proxyWithFallback(clientReq, clientRes, body, r.tier).then(result => {
-        const sessionEscalated = r.sessionId && getSessionTier(r.sessionId) !== r.tier;
         updateSession(r.sessionId, result.finalTier);
 
         flags.sessionEscalated = result.finalTier !== r.tier;
         flags.fallback = result.fallback || false;
 
-        const cost = recordRequest(result.finalTier, r.totalTokens || 0, flags, false);
+        const costs = recordRequest(result.finalTier, r.totalTokens || 0, flags, false, result.usage);
+
+        const usageLog = result.usage
+          ? `in=${result.usage.input_tokens} out=${result.usage.output_tokens} actual=$${costs.actual?.toFixed(4)}`
+          : `estimated=$${costs.estimated.toFixed(4)}`;
+        log('INFO', `[COST] ${result.finalTier} ${usageLog}`);
+
         writeFeedback({
           ts: new Date().toISOString(), orig, target: CONFIG.tiers?.[result.finalTier]?.model,
           tier: result.finalTier, scoredTier: r.tier, score: r.score, reason: r.reason,
-          ...flags, tokens: r.totalTokens, costUsd: cost, shadow: false, ms,
+          ...flags,
+          tokens: r.totalTokens,
+          usage: result.usage || null,
+          estimatedCostUsd: costs.estimated,
+          actualCostUsd: costs.actual,
+          costUsd: costs.cost,
+          shadow: false, ms,
           sessionId: r.sessionId?.slice(0, 16),
         });
       }).catch(err => {
@@ -705,9 +805,9 @@ const server = createServer(handleRequest);
 
 server.listen(port, bind, () => {
   const t = CONFIG.tiers || {};
-  log('INFO', `Dispatcher v5 — ${bind}:${port}`);
+  log('INFO', `Dispatcher v5.2 — ${bind}:${port} — SSE streaming + actual cost`);
   console.log(`
-  openclaw-hybrid-dispatcher v5 — Session-Aware Hybrid Router
+  openclaw-hybrid-dispatcher v5.2 — Session-Aware Hybrid Router
   ${bind}:${port}
 
   LOCAL  = ${t.LOCAL?.model} (${CONFIG.upstreams?.ollama?.baseUrl})
@@ -719,6 +819,7 @@ server.listen(port, bind, () => {
   Session:  ${CONFIG.session?.enabled ? `ON (TTL ${CONFIG.session.ttlMinutes || 30}min)` : 'OFF'}
   Fallback: ${CONFIG.fallback?.maxRetries ?? 2} retries
   Budget:   ${CONFIG.budget?.enabled ? `$${CONFIG.budget.dailyLimitUsd}/dia | $${CONFIG.budget.monthlyLimitUsd}/mês` : 'OFF'}
+  Cost:     actual (SSE + JSON, input + output tokens)
   Locale:   ${CONFIG.locale}
 `);
 });
