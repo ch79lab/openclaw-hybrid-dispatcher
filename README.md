@@ -158,7 +158,7 @@ Copie `config.example.json` → `config.json` e edite.
 ```json
 {
   "tiers": {
-    "LOCAL":  { "upstream": "ollama", "model": "qwen3:8b" },
+    "LOCAL":  { "upstream": "ollama", "model": "agent-qwen:latest" },
     "LIGHT":  { "upstream": "cloud",  "model": "claude-haiku-4-5-20251001" },
     "MEDIUM": { "upstream": "cloud",  "model": "claude-sonnet-4-6" },
     "HEAVY":  { "upstream": "cloud",  "model": "claude-sonnet-4-6" }
@@ -413,7 +413,7 @@ Copy `config.example.json` → `config.json` and edit.
 ```json
 {
   "tiers": {
-    "LOCAL":  { "upstream": "ollama", "model": "qwen3:8b" },
+    "LOCAL":  { "upstream": "ollama", "model": "agent-qwen:latest" },
     "LIGHT":  { "upstream": "cloud",  "model": "claude-haiku-4-5-20251001" },
     "MEDIUM": { "upstream": "cloud",  "model": "claude-sonnet-4-6" },
     "HEAVY":  { "upstream": "cloud",  "model": "claude-sonnet-4-6" }
